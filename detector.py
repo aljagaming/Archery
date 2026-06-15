@@ -15,41 +15,35 @@ class Detector:
         self.currently_detecting = True;
         self.pixel_threshold = 50
 
+        self.video = cv2.VideoCapture(camera_number)
+        self.video.set(cv2.CAP_PROP_EXPOSURE, 2)
 
 
     def detect(self):
 
-
-        video = cv2.VideoCapture(self.camera_number)
-        video.set(cv2.CAP_PROP_EXPOSURE, 2)
-
-        print(video.get(cv2.CAP_PROP_EXPOSURE))
-
-        THRESHOLD = 0.1
-
-        ret, frame = video.read()
-
+        ret, frame = self.video.read()
         if not ret:
             print("FIRST camera read failed")
             return
-        else:
-            self.evaluator = Evaluator(frame)
-            print("First camera read sucesfully evaluator instantiated ")
 
         print("Warming up camera...")
         for _ in range(30):  # skip 30 frames (~1 second)
-            video.read()
+            self.video.read()
         for _ in range(30):  # skip 30 frames (~1 second)
-            video.read()
+            self.video.read()
 
-        ret, frame_old = video.read()
-        ret, frame_new = video.read()
+        print("Initialising evaluator...")
+        n_frames = 200;
+        frame_accumulation = self.frame_accumulator(n_frames)
+        self.evaluator = Evaluator(frame_accumulation)
+        print("Evaluator initialized successfully!")
 
-
+        # Change detection ---------------------------------------------------
+        ret, frame_new = self.video.read()
         while self.currently_detecting:
 
             frame_old = frame_new
-            ret, frame_new = video.read()
+            ret, frame_new = self.video.read()
 
             if not ret:
                 print("ERROR: Camera read failed")
@@ -83,6 +77,14 @@ class Detector:
                 print("nothing changed!!!!!")
 
 
+    def frame_accumulator (self, number_of_frames):
+        frame_acumulation = [];
+
+        for i in range(number_of_frames):
+            ret, frame = self.video.read()
+            if ret:
+                frame_acumulation.append(frame)
+        return frame_acumulation
 
 
 def play_sound():
