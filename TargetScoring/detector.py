@@ -1,22 +1,23 @@
 import time
+from time import sleep
 
 import cv2
 import subprocess
 import threading
-
-from evaluator import Evaluator
+from .evaluator import Evaluator
 
 
 class Detector:
     def __init__(self, camera_number):
         self.camera_number = camera_number
-        self.time_between_checks_ms = None
-        self.evaluator = None
+
         self.currently_detecting = True;
         self.pixel_threshold = 50
+        self.fps = 23                   #tested
+        self.detection_rate_delay = 0
+        self.arrow_number = 1
 
         self.video = cv2.VideoCapture(camera_number)
-        self.video.set(cv2.CAP_PROP_EXPOSURE, 2)
 
 
     def detect(self):
@@ -29,17 +30,19 @@ class Detector:
         print("Warming up camera...")
         for _ in range(30):  # skip 30 frames (~1 second)
             self.video.read()
-        for _ in range(30):  # skip 30 frames (~1 second)
-            self.video.read()
 
         print("Initialising evaluator...")
-        n_frames = 200;
+        n_frames = 20;
         frame_accumulation = self.frame_accumulator(n_frames)
         self.evaluator = Evaluator(frame_accumulation)
         print("Evaluator initialized successfully!")
 
         # Change detection ---------------------------------------------------
+        print("Detecting...")
         ret, frame_new = self.video.read()
+
+        test_counter=0;
+
         while self.currently_detecting:
 
             frame_old = frame_new
@@ -60,31 +63,37 @@ class Detector:
                                                                                              # returns the treshold and the thresh filtered output
             diff_pixels_num = cv2.countNonZero(thresh)
 
-            print(f"Number of different pixels: {diff_pixels_num}")
+            #print(f"Number of different pixels: {diff_pixels_num}")
 
 
 
             if diff_pixels_num > self.pixel_threshold:
-                print("CHANGEEDDDDD!!!!!")
+                time_of_shot = time.time()
+                print("Change detected!")
                 threading.Thread(target=play_sound).start()
-                cv2.imshow("The picture", frame_new)
-                cv2.waitKey(0)
+                self.evaluator.add_stage("Detector: Detected change image:",frame_new)
                 score = self.evaluator.evaluate(frame_new)
-                print(f"Changed detected; score is: {score} at time: {time.time()}")
-                self.evaluator.debug();
-                break
-            else:
-                print("nothing changed!!!!!")
+                print(f"Changed detected; score is: {score} at time: {time_of_shot}")
+                test_counter += 1
+
+                #self.evaluator.debug();
+            if (test_counter >= self.arrow_number):
+                self.currently_detecting = False
+
+
+            sleep(self.detection_rate_delay)
+        self.evaluator.debug();
+
 
 
     def frame_accumulator (self, number_of_frames):
-        frame_acumulation = [];
+        buffer = [];
 
         for i in range(number_of_frames):
             ret, frame = self.video.read()
             if ret:
-                frame_acumulation.append(frame)
-        return frame_acumulation
+                buffer.append(frame)
+        return buffer
 
 
 def play_sound():

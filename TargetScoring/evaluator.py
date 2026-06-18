@@ -1,64 +1,50 @@
-from inspect import unwrap
-from multiprocessing.resource_sharer import stop
-
 import cv2
 import numpy as np
-from numpy import linalg
+
 
 class Evaluator:
 
     def __init__(self, initial_images):
         if(initial_images is None):
-            print("ERROR: The initial image is None")
+            print("\033[35m[ERROR: The initial image is None\033[0m")
             return
         self.frame_accumulator = initial_images
         self.original_image = initial_images[0].copy()  # original image
         self.original_image_gray = cv2.cvtColor(initial_images[0].copy(), cv2.COLOR_BGR2GRAY)
-        self.original_image_unscrewed = None
+        self.original_image_warped = None
         self.stage_images = []                              # [img name] [image]
 
         self.prev_lines = []
 
         self.homography_matrix = None
-        self.unscrewed_image_width = 600
-        self.unscrewed_image_height = 600
+        self.warped_image_width = 600
+        self.warped_image_height = 600
 
         self.add_stage("0. Initialisation: Original Image ", self.original_image)
+        self.delete_previous_lines_thickness = 20
 
-        self.unscrew()
-
+        self.warp()
+        self.set_startingLines()
 
     ## Homography matrix things
-    def unscrew(self):
+    def warp(self):
 
         # Params ------------------------------------------------------
         canny_lower = 50
         canny_upper = 150
 
         # Edge Detection ----------------------------------------------
-        img = self.original_image_gray.copy()
-        img = cv2.GaussianBlur(img, (5, 5), 0)
+        edges = np.zeros_like(self.original_image_gray)
 
-        edges = np.zeros_like(img)
         for frame in self.frame_accumulator:
             frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            frame_gray = cv2.GaussianBlur(frame_gray, (5, 5), 0)
             edge_n = cv2.Canny(frame_gray, canny_lower, canny_upper)
             edges = cv2.bitwise_or(edges, edge_n, mask=edge_n)
 
-        edges_previously = cv2.Canny(img, canny_lower, canny_upper)
-
-        cv2.imshow("EDGES PREVIOUSLY", edges_previously)
-        cv2.waitKey(0)
-        cv2.imshow("EDGES ACCUMULATED", edges)
-        cv2.waitKey(0)
-
-
-
-
-
-
-
+        # Dilate with 3*3 matrix np.uint8 - 8 bit unsigned int
+        # Dilated so that contour is actually convex and more importantly, connected
+        kernel = np.ones((3, 3), np.uint8)
+        edges = cv2.dilate(edges, kernel, iterations=2)
 
         # Contours ----------------------------------------------------
         # First parameter cv2.RETR_TREE how to return the relationship between the contours
@@ -66,32 +52,51 @@ class Evaluator:
         contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
         if len(contours) <= 0:
-            print("ERROR in unscrew: No contours were found found!")
-            return True
-        print("Found " + str(len(contours)) + " contours")
+            print("\033[35mERROR in warped: No contours were found found!\033[0m")
+            return 0
+        #Find biggest contour based on Area and if its conves
 
-        #Find biggest contour based on Area and shape
-        for contour in sorted(contours, key=cv2.contourArea, reverse=True):
-            #print("The contour area is: " + str(cv2.contourArea(contour)))
-            epsilon = 0.02 * cv2.arcLength(contour, True)       # Calculates the perimeter of the contour and Checks how much the simplified (aproximated point) can be from real thing
-            approx = cv2.approxPolyDP(contour, epsilon, True)
+        biggest_contour = None
+        approx = None
+        biggest_area = 0;
+        for i, contour in enumerate(contours):
 
-            if len(approx) == 4 and cv2.isContourConvex(approx):  # must be a square/rectangle
-                biggest_contour = contour
+            rect = cv2.minAreaRect(contour)
+            width, height = rect[1]
+            area = width * height
 
-                break
+            if area < 5000:
+                continue
+
+            if area > biggest_area:
+
+                epsilon = 0.02 * cv2.arcLength(contour, True)
+                approx_temp = cv2.approxPolyDP(contour, epsilon, True)  # smooth it first
+
+                if cv2.isContourConvex(approx_temp):
+                    biggest_area = area
+                    biggest_contour = contour
+                    approx = approx_temp
+
+
+        if (biggest_contour is None):
+            print("\033[35mERROR in warped: Could not find biggest contour\033[0m");
+            return 0
+
+        if len(approx) != 4:
+            print("\033[35mERROR in warped: Biggest Contour is not square [0m");
+            return 0
 
         print("The biggest contour is: " + str(cv2.contourArea(biggest_contour)))
+        print("Approx has " + str(len(approx)) + " corners")
 
-        # This can all be deleted after debuging is finished------
+        # This can all be deleted after debbuging is finished------
         #debug_img = self.original_image.copy()
         #cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 2)  # all contours in green
         #cv2.drawContours(debug_img, [biggest_contour], -1, (0, 0, 255), 10)
+        #cv2.drawContours(debug_img, [approx], -1, (255, 0, 0), 4)
         #cv2.imshow("Debug Image", debug_img)
         #cv2.waitKey(0)
-
-        if(biggest_contour is None):
-            print("ERROR in unscrew: Could not find biggest contour");
 
         # Homography ----------------------------------------------------
         # ASSUMES BIGGEST CONTOUR IS THE SQUARED
@@ -108,28 +113,45 @@ class Evaluator:
 
         target_format = np.array([
             [0, 0],                                                                 # top-left corner
-            [self.unscrewed_image_width-1, 0],                                      # top-right corner
-            [self.unscrewed_image_width - 1, self.unscrewed_image_height - 1],      # bottom-right corner
-            [0, self.unscrewed_image_height - 1]                                    # bottom-left corner
+            [self.warped_image_width - 1, 0],                                      # top-right corner
+            [self.warped_image_width - 1, self.warped_image_height - 1],      # bottom-right corner
+            [0, self.warped_image_height - 1]                                    # bottom-left corner
         ], dtype=np.float32)
 
         self.homography_matrix = cv2.getPerspectiveTransform(square, target_format) #homography matrix
 
-        unwarped = cv2.warpPerspective(self.original_image.copy(), self.homography_matrix, (self.unscrewed_image_width, self.unscrewed_image_height))
-        self.original_image_unscrewed = unwarped.copy()
-        self.add_stage("1. Unscrew: Unwrapped original image", unwarped)
+        warped = cv2.warpPerspective(self.original_image.copy(),
+                                       self.homography_matrix,
+                                       (self.warped_image_width, self.warped_image_height))
+        self.original_image_warped = warped.copy()
+        self.add_stage("1. Warped: warped original image", warped)
 
-        unwarped_gray = cv2.cvtColor(unwarped, cv2.COLOR_BGR2GRAY)
-        #unwarped_gray = cv2.GaussianBlur(unwarped_gray, (5, 5), 0)
-        unwarped_edges = cv2.Canny(unwarped_gray, canny_lower, canny_upper)
-        self.prev_lines = self.detectLines(unwarped_edges, treshold=20)
-        self.add_stage("2. Unscrew: Detected lines From Unscrewed image", self.drawLines(unwarped, self.prev_lines))
+        cv2.imshow("WARPED", warped)
+        cv2.waitKey(0)
 
         return None
 
+    def set_startingLines(self):
+        canny_lower = 50
+        canny_upper = 150
 
+        edges = np.zeros_like(self.original_image_gray)
 
+        for frame in self.frame_accumulator:
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            edge_n = cv2.Canny(frame_gray, canny_lower, canny_upper)
+            edges = cv2.bitwise_or(edges, edge_n, mask=edge_n)
 
+        warped_edges = cv2.warpPerspective(edges,
+                                           self.homography_matrix,
+                                           (self.warped_image_width, self.warped_image_height))
+        self.prev_lines = self.detectLines(warped_edges, treshold=30)
+        empty = np.zeros_like(self.original_image_warped)
+
+        if self.prev_lines is None:
+            print("\033[35mERROR in set_startingLines:\033[0m")
+            return 0
+        self.add_stage("2. set_startingLines: Detected lines From Warped image", self.drawLines(empty.copy(), self.prev_lines))
 
 
     def evaluate(self, eval_img):
@@ -140,10 +162,10 @@ class Evaluator:
             4. XOR (Isolate arrow)
         """
         if(eval_img is None):
-            print("ERROR in evaluate: The evaluate image is None")
+            print("\033[35mERROR in evaluate: The evaluate image is None\033[0m")
             exit(0)
         if(self.homography_matrix is None):
-            print("ERROR in evaluate: The homography matrix is None")
+            print("\033[35mERROR in evaluate: The homography matrix is None\033[0m")
             exit(0)
 
         #Params -------------------------------------------
@@ -153,7 +175,7 @@ class Evaluator:
         canny_lower = 50
         canny_upper = 150
 
-        target_size_in_cm = 50  # the rectangle
+        target_size_in_cm = 125  # the rectangle
         target_specifications = np.array([      #[<cm_radius, score]
             [2, 10],
             [4, 9],
@@ -162,32 +184,32 @@ class Evaluator:
             [10, 6],
         ], dtype=np.int32)
 
-        center_pixel = [self.unscrewed_image_height // 2, self.unscrewed_image_width // 2]  # [y,x] cos cv2 does it like that
-        pixel_per_cm = self.unscrewed_image_width / target_size_in_cm  # Pixels per cms
+        center_pixel = [self.warped_image_height // 2, self.warped_image_width // 2]  # [y,x] cos cv2 does it like that
+        pixel_per_cm = self.warped_image_width / target_size_in_cm  # Pixels per cms
 
         # 1 WARP -------------------------------------------------------------------
-        unwrapped_img = cv2.warpPerspective(img.copy(), self.homography_matrix, (self.unscrewed_image_width, self.unscrewed_image_height))
-        empty_img = np.zeros_like(unwrapped_img)
+        warped_img = cv2.warpPerspective(img.copy(), self.homography_matrix, (self.warped_image_width, self.warped_image_height))
+        empty_img = np.zeros_like(warped_img)
         empty_img = cv2.cvtColor(empty_img, cv2.COLOR_GRAY2BGR)
 
         # 2 Canny edge detection ---------------------------------------------------
-        edges = cv2.Canny(unwrapped_img, canny_lower, canny_upper)
+        edges = cv2.Canny(warped_img, canny_lower, canny_upper)
 
         # 3 Hough Line detction ---------------------------------------------------
         lines = self.detectLines(edges, treshold=20)
         if(lines is None):
-            print("ERROR in evaluate3: The evaluate lines is None")
-
-
+            print("\033[35mERROR in evaluate: The evaluate lines is None\033[0m")
+            return 0
 
         # 4 Isolate individual arrow ---------------------------------------------------
         current_lines_img = self.drawLines(empty_img, lines)
-        arrow_isolated_img = self.drawLines(current_lines_img.copy(), self.prev_lines, (0, 0, 0), 10) #thick so it paints black over it
+        arrow_isolated_img = self.drawLines(current_lines_img.copy(), self.prev_lines, (0, 0, 0), self.delete_previous_lines_thickness) #thick so it paints black over it
         arrow_isolated_img_gray = cv2.cvtColor(arrow_isolated_img.copy(), cv2.COLOR_BGR2GRAY)
+        #perform the line isolation again so to get clean arrow
         arrow_isolated_line = self.detectLines(arrow_isolated_img_gray,treshold=20)                                                 #this might be useful if it has big jumping gap so it can connect cross over arrows
 
         if arrow_isolated_line is None or len(arrow_isolated_line) == 0:
-            print("ERROR in Evaluation4: No isolated arrow detected")
+            print("\033[35mERROR in Evaluation4: No isolated arrow detected\033[0m")
             return 0
 
         # 5 Update previous lines ---------------------------------------------------
@@ -215,7 +237,6 @@ class Evaluator:
         print("SCOREEE IS : " + str(score))
 
         # 7 Debug -------------------------------------------------------------------
-
         visual = empty_img.copy()
         for radius, _ in target_specifications:
             cv2.circle(visual, (center_pixel[1], center_pixel[0]), int (radius*pixel_per_cm), (0, 255, 0), 1)
@@ -228,14 +249,35 @@ class Evaluator:
         cv2.line(visual, (center_pixel[1], center_pixel[0]), (min_point[1], min_point[0]), (255, 0, 0), 1)
         cv2.putText(visual,f"Score: {score}",(20, 40),cv2.FONT_HERSHEY_SIMPLEX,1.0,(255, 255, 255),2,cv2.LINE_AA)
 
-        self.add_stage("3. Evaluate: Unwrapped image", unwrapped_img)
+        self.add_stage("3. Evaluate: Warped image", warped_img)
         self.add_stage("4. Evaluate: Edge detection image", edges)
         self.add_stage("5. Evaluate: Line detection image", current_lines_img)
         self.add_stage("6. Evaluate: Arrow isolated image", arrow_isolated_img)
         self.add_stage("7. Evaluate: Visualisation image", visual)
-
         return score
 
+    # A method so line detection parameters are equal everywhere
+    def detectLines(self, img, treshold=50, minLineLength=20, maxLineGap=15):
+        if img is None:
+            print("\033[35mERROR in drawLines: No image to draw onto\033[0m")
+        img = img.copy()
+        return cv2.HoughLinesP(img,  # Returns a wird [ [[x1,x2,y1,y2]], [[x1,x2,y1,y2]] ] array
+                                   1,  # Precision of line length ~ 1px
+                                   np.pi / 180,  # Precision of line angle i degrees pi/180 is 1
+                                   threshold=treshold,
+                                   # How many white pixels it has to pass trough before calling it a line
+                                   minLineLength=minLineLength,  # Whats the minimal length on the line
+                                   maxLineGap=maxLineGap)
+
+    def drawLines(self, img, lines, color=(0, 255, 0), line_thickness=1):
+        if (img is None):
+            print("\033[35mERROR in drawLines: No image to draw onto\033[0m")
+            return img
+        draw_img = img.copy()
+        for line in lines:
+            for x1, y1, x2, y2 in line:
+                cv2.line(draw_img, (x1, y1), (x2, y2), color, line_thickness)
+        return draw_img
 
     def debug(self):
         for i, (name, img) in enumerate(self.stage_images):
@@ -244,33 +286,6 @@ class Evaluator:
 
     def add_stage(self, label, img):
         self.stage_images.append((label, img.copy()))
-
-
-    #A method so line detection parameters are equal everywhere
-    def detectLines(self, img, treshold=50, minLineLength=20,maxLineGap=15):
-        if img is None:
-            print("ERROR in drawLines: No image to draw onto")
-        img=img.copy()
-        return  cv2.HoughLinesP(img,                                    # Returns a wird [ [[x1,x2,y1,y2]], [[x1,x2,y1,y2]] ] array
-                                1,                                  # Precision of line length ~ 1px
-                                np.pi / 180,                            # Precision of line angle i degrees pi/180 is 1
-                                threshold=treshold,                     # How many white pixels it has to pass trough before calling it a line
-                                minLineLength=minLineLength,            # Whats the minimal length on the line
-                                maxLineGap=maxLineGap)
-
-    def drawLines(self, img, lines, color=(0, 255, 0), line_thickness=1):
-
-        if (img is None):
-            print("ERROR in drawLines: No image to draw onto")
-            return img
-        draw_img = img.copy()
-        for line in lines:
-            for x1, y1, x2, y2 in line:
-                cv2.line(draw_img, (x1, y1), (x2, y2), color, line_thickness)
-        return draw_img
-
-
-
 
 
 
